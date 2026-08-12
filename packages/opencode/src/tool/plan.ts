@@ -2,6 +2,7 @@ import z from "zod"
 import path from "path"
 import { Effect } from "effect"
 import * as Tool from "./tool"
+import { Agent } from "../agent/agent"
 import { Question } from "../question"
 import { Session } from "../session"
 import { MessageV2 } from "../session/message-v2"
@@ -23,6 +24,7 @@ export const PlanExitTool = Tool.define(
     const session = yield* Session.Service
     const question = yield* Question.Service
     const provider = yield* Provider.Service
+    const agents = yield* Agent.Service
 
     return {
       description: EXIT_DESCRIPTION,
@@ -74,7 +76,18 @@ export const PlanExitTool = Tool.define(
             }
           }
 
-          const model = getLastModel(ctx.sessionID) ?? (yield* provider.defaultModel())
+          const build = yield* agents.get("build")
+          const agentModel = build?.modelRef
+            ? yield* provider
+                .resolveModelRef(build.modelRef)
+                .pipe(Effect.map((m) => ({ providerID: m.providerID, modelID: m.id })))
+            : build?.model
+          const model = agentModel ?? getLastModel(ctx.sessionID) ?? (yield* provider.defaultModel())
+          const full =
+            build?.variant && agentModel
+              ? yield* provider.getModel(agentModel.providerID, agentModel.modelID).pipe(Effect.catchDefect(() => Effect.void))
+              : undefined
+          const variant = build?.variant && full?.variants?.[build.variant] ? build.variant : undefined
 
           const msg: MessageV2.User = {
             id: MessageID.ascending(),
@@ -82,7 +95,7 @@ export const PlanExitTool = Tool.define(
             role: "user",
             time: { created: Date.now() },
             agent: "build",
-            model,
+            model: { ...model, variant },
           }
           yield* session.updateMessage(msg)
           yield* session.updatePart({

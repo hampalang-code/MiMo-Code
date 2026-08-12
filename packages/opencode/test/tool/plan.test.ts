@@ -4,8 +4,10 @@ import { Agent } from "../../src/agent/agent"
 import * as CrossSpawnSpawner from "../../src/effect/cross-spawn-spawner"
 import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider"
+import { ModelID, ProviderID } from "../../src/provider/schema"
 import { Question } from "../../src/question"
 import { Session } from "../../src/session"
+import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { Truncate } from "../../src/tool"
 import { PlanExitTool } from "../../src/tool/plan"
@@ -47,7 +49,74 @@ const pending = Effect.fn("PlanToolTest.pending")(function* (question: Question.
   }
 })
 
+const seedPlanTurn = Effect.fn("PlanToolTest.seedPlanTurn")(function* (sessionID: SessionID) {
+  const sessions = yield* Session.Service
+  yield* sessions.updateMessage({
+    id: MessageID.ascending(),
+    sessionID,
+    role: "user",
+    time: { created: Date.now() },
+    agent: "plan",
+    model: { providerID: ProviderID.make("plan-provider"), modelID: ModelID.make("plan-model") },
+  } satisfies MessageV2.User)
+})
+
+const syntheticBuildMessage = (sessionID: SessionID) => {
+  const found = [...MessageV2.stream(sessionID, { agentID: "*" })].find(
+    (m) => m.info.role === "user" && m.info.agent === "build",
+  )
+  if (found?.info.role !== "user") throw new Error("synthetic build message missing")
+  return found.info
+}
+
 describe("tool.plan", () => {
+  it.live("plan_exit stamps the synthetic build message with the build agent's configured model", () =>
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const question = yield* Question.Service
+          const info = yield* sessions.create({ title: "Test" })
+          yield* seedPlanTurn(info.id)
+          const tool = yield* (yield* PlanExitTool).init()
+
+          const fiber = yield* tool.execute({}, ctx(info.id, "plan")).pipe(Effect.forkScoped)
+          const item = yield* pending(question)
+          yield* question.reply({ requestID: item.id, answers: [["Yes"]] })
+
+          const result = yield* Fiber.join(fiber)
+          expect(result.metadata).toMatchObject({ switched: true })
+          expect(syntheticBuildMessage(info.id).model).toMatchObject({
+            providerID: "build-provider",
+            modelID: "build-model",
+          })
+        }),
+      { config: { agent: { build: { model: "build-provider/build-model" } } } },
+    ),
+  )
+
+  it.live("plan_exit without a configured build model keeps inheriting the last model", () =>
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const question = yield* Question.Service
+        const info = yield* sessions.create({ title: "Test" })
+        yield* seedPlanTurn(info.id)
+        const tool = yield* (yield* PlanExitTool).init()
+
+        const fiber = yield* tool.execute({}, ctx(info.id, "plan")).pipe(Effect.forkScoped)
+        const item = yield* pending(question)
+        yield* question.reply({ requestID: item.id, answers: [["Yes"]] })
+
+        yield* Fiber.join(fiber)
+        expect(syntheticBuildMessage(info.id).model).toMatchObject({
+          providerID: "plan-provider",
+          modelID: "plan-model",
+        })
+      }),
+    ),
+  )
+
   it.live("plan_exit answering No resolves with continue-planning guidance", () =>
     provideTmpdirInstance(() =>
       Effect.gen(function* () {
