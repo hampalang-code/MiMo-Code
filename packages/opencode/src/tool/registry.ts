@@ -57,6 +57,7 @@ import { Instruction } from "../session/instruction"
 import { AppFileSystem } from "@mimo-ai/shared/filesystem"
 import { Bus } from "../bus"
 import { Agent } from "../agent/agent"
+import { hasActorTool } from "@/agent/config"
 import { Skill } from "../skill"
 import { Permission } from "@/permission"
 import { ActorRegistry } from "@/actor/registry"
@@ -324,25 +325,6 @@ export const layer = Layer.effect(
       return (yield* all()).map((tool) => tool.id)
     })
 
-    const describeSkill = Effect.fn("ToolRegistry.describeSkill")(function* (agent: Agent.Info) {
-      const list = yield* skill.modelInvocable(agent)
-      if (list.length === 0) return "No skills are currently available."
-      return [
-        "Load a specialized skill that provides domain-specific instructions and workflows.",
-        "",
-        "When you recognize that a task matches one of the available skills listed below, use this tool to load the full skill instructions.",
-        "",
-        "The skill will inject detailed instructions, workflows, and access to bundled resources (scripts, references, templates) into the conversation context.",
-        "",
-        'Tool output includes a `<skill_content name="...">` block with the loaded content.',
-        "",
-        "The following skills provide specialized sets of instructions for particular tasks",
-        "Invoke this tool to load a skill when a task matches one of the available skills listed below:",
-        "",
-        Skill.fmt(list, { verbose: false }),
-      ].join("\n")
-    })
-
     const describeWorkflow = Effect.fn("ToolRegistry.describeWorkflow")(function* () {
       return renderWorkflowCatalog()
     })
@@ -415,6 +397,25 @@ export const layer = Layer.effect(
       // allowlist (build/plan/compose) and subagents — must not see `session`.
       filtered = filtered.filter((tool) => tool.id !== "session" || input.agent.name === "orchestrator")
 
+      // No subagent may spawn further subagents. `actor` is the only tool that
+      // spawns/runs child agents, so mask it out for every `mode: "subagent"`
+      // agent — native (general/explore) AND user-config-defined, which default
+      // to `"*": "allow"` and would otherwise recurse. Gate on mode rather than
+      // agent name so a custom subagent cannot opt itself back in.
+      //
+      // SYSTEM_SPAWNED_AGENT_TYPES are exempt: they are spawned by the runtime,
+      // never by a model, so they pose no recursive-delegation risk. The
+      // exemption is also load-bearing for checkpoint-writer, a fork agent whose
+      // LLM-visible tool schema must stay byte-identical to its (primary) parent's
+      // captured ForkContext.tools or the prefix cache breaks — see ForkContext
+      // JSDoc in actor/spawn.ts. Its real tool authority is the actor.tools
+      // whitelist set in tryStartCheckpointWriter, which already omits `actor`.
+      // The condition lives in hasActorTool so prompt surfaces that name the tool
+      // read the same gate.
+      if (!hasActorTool(input.agent)) {
+        filtered = filtered.filter((tool) => tool.id !== ActorTool.id)
+      }
+
       return { filtered, useGPTTools }
     })
 
@@ -451,7 +452,6 @@ export const layer = Layer.effect(
             description: [
               description,
               tool.id === ActorTool.id ? yield* describeTask(input.agent) : undefined,
-              tool.id === SkillTool.id ? yield* describeSkill(input.agent) : undefined,
               tool.id === WorkflowTool.id ? yield* describeWorkflow() : undefined,
               tool.id === ToolScriptTool.id ? yield* describeToolScript(availableTools.filtered) : undefined,
             ]

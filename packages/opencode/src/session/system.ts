@@ -24,6 +24,7 @@ import type { Agent } from "@/agent/agent"
 import { Permission } from "@/permission"
 import { Skill } from "@/skill"
 import { isSkillSearchDisabled, type SkillSearchModel } from "@/skill/search"
+import { Flag } from "@/flag/flag"
 
 function renderGitResult(result: Git.Result, fallback = "(none)") {
   if (result.exitCode !== 0) return fallback
@@ -69,6 +70,7 @@ export const layer = Layer.effect(
 
     return Service.of({
       environment: Effect.fn("SystemPrompt.environment")(function* (model: Provider.Model, now: number) {
+        if (!Flag.MIMOCODE_ENABLE_DYNAMIC_SYSTEM_PROMPT) return []
         const project = Instance.project
         if (provider(model)[0] === PROMPT_ANTHROPIC) {
           const key = `${Instance.directory}\0${now}\0${model.providerID}\0${model.api.id}`
@@ -124,10 +126,6 @@ export const layer = Layer.effect(
             `  Workspace root folder: ${Instance.worktree}`,
             `  Is directory a git repo: ${project.vcs === "git" ? "yes" : "no"}`,
             `  Platform: ${process.platform}`,
-            // Anchored to the session's creation time (not request time) so this block
-            // stays byte-identical across every turn of a session — including ones that
-            // cross midnight — keeping it inside the Anthropic cached system prefix.
-            `  Today's date: ${new Date(now).toDateString()}`,
             `</env>`,
           ].join("\n"),
           `IMPORTANT: Your response must ALWAYS strictly follow the same major language as the user.`,
